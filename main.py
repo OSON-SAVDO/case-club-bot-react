@@ -9,6 +9,7 @@ from gtts import gTTS
 import speech_recognition as sr
 from pydub import AudioSegment
 
+# --- ТАНЗИМОТ ---
 TOKEN = '8560757080:AAFXJLy71LZTPKMmCiscpe1mWKmj3lC-hDE'
 
 logging.basicConfig(level=logging.INFO)
@@ -16,97 +17,114 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 recognizer = sr.Recognizer()
 
+# Нигоҳ доштани ҳолати корбар (бо нобаёнӣ Chain Translation)
 user_modes = {}
 
 def get_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇹🇯 Тоҷикӣ ➡️ 🇬🇧 English", callback_data="tg_en"),
-         InlineKeyboardButton(text="🇬🇧 English ➡️ 🇹🇯 Тоҷикӣ", callback_data="en_tg")],
-        [InlineKeyboardButton(text="🇷🇺 Русский ➡️ 🇬🇧 English", callback_data="ru_en"),
-         InlineKeyboardButton(text="🇬🇧 English ➡️ 🇷🇺 Русский", callback_data="en_ru")],
-        [InlineKeyboardButton(text="🇹🇯 Тоҷикӣ ➡️ 🇷🇺 Русский", callback_data="tg_ru"),
-         InlineKeyboardButton(text="🇷🇺 Русский ➡️ 🇹🇯 Тоҷикӣ", callback_data="ru_tg")]
+        [InlineKeyboardButton(text="🔗 TG ➡️ RU ➡️ EN (Занҷиравӣ)", callback_data="chain_tg_ru_en")],
+        [InlineKeyboardButton(text="🇹🇯 Тоҷикӣ ➡️ 🇬🇧 English", callback_data="tg_en")],
+        [InlineKeyboardButton(text="🇷🇺 Русский ➡️ 🇬🇧 English", callback_data="ru_en")],
+        [InlineKeyboardButton(text="🇬🇧 English ➡️ 🇷🇺 Русский", callback_data="en_ru")]
     ])
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    user_modes[message.from_user.id] = 'tg_en'
-    await message.answer("Хуш омадед! Самти тарҷумаро интихоб кунед:", reply_markup=get_keyboard())
+    user_modes[message.from_user.id] = 'chain_tg_ru_en'
+    await message.answer(
+        "Салом! Ман боти тарҷумони ақлнок. \n"
+        "Ҳолати **Занҷиравӣ (TG->RU->EN)** фаъол аст. Овоз фиристед!", 
+        reply_markup=get_keyboard()
+    )
 
 @dp.callback_query(F.data.contains("_"))
 async def set_mode(callback: types.CallbackQuery):
     user_modes[callback.from_user.id] = callback.data
-    m = callback.data.replace('_', ' to ')
-    await callback.message.answer(f"✅ Ҳолати нав: {m.upper()}")
+    await callback.message.answer(f"✅ Ҳолати нав интихоб шуд: {callback.data}")
     await callback.answer()
 
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
-    mode = user_modes.get(message.from_user.id, 'tg_en')
-    src, dest = mode.split('_')
+    mode = user_modes.get(message.from_user.id, 'chain_tg_ru_en')
     
-    # Танзими забони шунавоӣ (STT)
-    stt_langs = {'tg': 'tg-TJ', 'en': 'en-US', 'ru': 'ru-RU'}
-    stt_lang = stt_langs.get(src, 'en-US')
+    sent_msg = await message.answer("Дар ҳоли коркард... 🔄")
     
     ogg_path = f"v_{message.from_user.id}.ogg"
     wav_path = f"v_{message.from_user.id}.wav"
+    
     await bot.download_file((await bot.get_file(message.voice.file_id)).file_path, ogg_path)
 
     try:
-        # Табдил ба WAV барои шинохтан
+        # 1. Табдил ба WAV (FFmpeg дар сервер лозим аст)
         AudioSegment.from_file(ogg_path).export(wav_path, format="wav")
         
 
         with sr.AudioFile(wav_path) as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            recognizer.adjust_for_ambient_noise(source)
             audio_data = recognizer.record(source)
-            # Шинохтани матни аслӣ
-            original_text = recognizer.recognize_google(audio_data, language=stt_lang)
             
-            # Тарҷума
-            translated_text = GoogleTranslator(source=src, target=dest).translate(original_text)
+            # Агар ҳолат занҷиравӣ бошад
+            if mode == 'chain_tg_ru_en':
+                # Шинохтани овоз (Тоҷикӣ)
+                original_text = recognizer.recognize_google(audio_data, language='tg-TJ')
+                
+                # Қадами 1: TG -> RU
+                russian_text = GoogleTranslator(source='tg', target='ru').translate(original_text)
+                
+                # Қадами 2: RU -> EN
+                english_text = GoogleTranslator(source='ru', target='en').translate(russian_text)
+                
+                # Сохтани овоз (Англисӣ)
+                res_path = f"res_{message.from_user.id}.mp3"
+                gTTS(text=english_text, lang='en').save(res_path)
+                
+                result = (
+                    f"🇹🇯 **Шумо гуфтед:** {original_text}\n"
+                    f"🇷🇺 **Тарҷумаи русӣ:** {russian_text}\n"
+                    f"🇬🇧 **Тарҷумаи англисӣ:** {english_text}"
+                )
+                await message.answer(result, parse_mode="Markdown")
+                await message.answer_voice(FSInputFile(res_path))
+                os.remove(res_path)
             
-            # Сохтани овоз (TTS)
-            # gTTS барои тоҷикӣ ('tg') овоз надорад, бинобар ин 'ru'-ро барои талаффузи матни тоҷикӣ истифода мебарем
-            tts_lang = dest if dest in ['en', 'ru'] else 'ru'
-            res_path = f"ans_{message.from_user.id}.mp3"
-            gTTS(text=translated_text, lang=tts_lang).save(res_path)
-            
-            # Ҷавоби дутарафа: Матни аслӣ + Тарҷума
-            response_msg = (
-                f"🎤 **Шумо гуфтед ({src}):**\n_{original_text}_\n\n"
-                f"📝 **Тарҷума ({dest}):**\n**{translated_text}**"
-            )
-            
-            await message.answer(response_msg, parse_mode="Markdown")
-            await message.answer_voice(FSInputFile(res_path))
-            
-            if os.path.exists(res_path): os.remove(res_path)
-            
+            else:
+                # Тарҷумаи муқаррарӣ (агар тугмаҳои дигарро пахш кунед)
+                src, dest = mode.split('_')
+                stt_lang = 'tg-TJ' if src == 'tg' else 'ru-RU' if src == 'ru' else 'en-US'
+                text = recognizer.recognize_google(audio_data, language=stt_lang)
+                translated = GoogleTranslator(source=src, target=dest).translate(text)
+                
+                res_path = f"simple_{message.from_user.id}.mp3"
+                gTTS(text=translated, lang=dest if dest in ['en', 'ru'] else 'ru').save(res_path)
+                
+                await message.answer(f"🎤 {text}\n📝 {translated}")
+                await message.answer_voice(FSInputFile(res_path))
+                os.remove(res_path)
+
     except Exception as e:
-        await message.answer("❌ Мутаассифона, овозро фаҳмида натавонистам. Лутфан равшантар гӯед.")
+        await message.answer(f"❌ Хатогӣ: {e}")
     finally:
         for p in [ogg_path, wav_path]:
             if os.path.exists(p): os.remove(p)
+        await sent_msg.delete()
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
-    mode = user_modes.get(message.from_user.id, 'tg_en')
-    src, dest = mode.split('_')
+    # Тарҷумаи матн низ бо мантиқи занҷиравӣ (агар фаъол бошад)
+    mode = user_modes.get(message.from_user.id, 'chain_tg_ru_en')
     try:
-        translated = GoogleTranslator(source=src, target=dest).translate(message.text)
-        tts_lang = dest if dest in ['en', 'ru'] else 'ru'
-        res_path = f"t_{message.from_user.id}.mp3"
-        gTTS(text=translated, lang=tts_lang).save(res_path)
-        
-        await message.answer(f"📝 **Тарҷума:** {translated}", parse_mode="Markdown")
-        await message.answer_voice(FSInputFile(res_path))
-        os.remove(res_path)
+        if mode == 'chain_tg_ru_en':
+            ru = GoogleTranslator(source='tg', target='ru').translate(message.text)
+            en = GoogleTranslator(source='ru', target='en').translate(ru)
+            await message.answer(f"🇷🇺 Русӣ: {ru}\n🇬🇧 Англисӣ: {en}")
+        else:
+            src, dest = mode.split('_')
+            res = GoogleTranslator(source=src, target=dest).translate(message.text)
+            await message.answer(f"📝 Тарҷума: {res}")
     except Exception as e:
         await message.answer(f"Хато: {e}")
 
-async def main():
+async main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
